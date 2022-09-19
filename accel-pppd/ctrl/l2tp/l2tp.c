@@ -123,6 +123,11 @@ struct l2tp_sess_t
 	struct l2tp_conn_t *paren_conn;
 	uint16_t sid;
 	uint16_t peer_sid;
+/* We will keep l2tp attributes Calling-Number/Called-Number and their length while the session exists */
+	char *calling_num;
+	int calling_num_len;
+	char *called_num;
+	int called_num_len;
 
 	unsigned int ref_count;
 	int state1;
@@ -1771,25 +1776,25 @@ static int l2tp_session_start_data_channel(struct l2tp_sess_t *sess)
 	sess->ctrl.max_mtu = conf_ppp_max_mtu;
 	sess->ctrl.mppe = conf_mppe;
 
-	sess->ctrl.calling_station_id = _malloc(17);
+	sess->ctrl.calling_station_id = _malloc(sess->calling_num_len+1);
 	if (sess->ctrl.calling_station_id == NULL) {
 		log_session(log_error, sess,
 			    "impossible to start data channel:"
 			    " allocation of calling station ID failed\n");
 		goto err;
 	}
-	u_inet_ntoa(sess->paren_conn->peer_addr.sin_addr.s_addr,
-		    sess->ctrl.calling_station_id);
+	memcpy(sess->ctrl.calling_station_id, sess->calling_num, sess->calling_num_len);
+	sess->ctrl.calling_station_id[sess->calling_num_len+1] = '\0';
 
-	sess->ctrl.called_station_id = _malloc(17);
+	sess->ctrl.called_station_id = _malloc(sess->called_num_len);
 	if (sess->ctrl.called_station_id == NULL) {
 		log_session(log_error, sess,
 			    "impossible to start data channel:"
 			    " allocation of called station ID failed\n");
 		goto err;
 	}
-	u_inet_ntoa(sess->paren_conn->host_addr.sin_addr.s_addr,
-		    sess->ctrl.called_station_id);
+	memcpy(sess->ctrl.called_station_id, sess->called_num, sess->called_num_len);
+	sess->ctrl.called_station_id[sess->called_num_len+1] = '\0';
 
 	if (conf_ip_pool) {
 		sess->ppp.ses.ipv4_pool_name = _strdup(conf_ip_pool);
@@ -3295,6 +3300,10 @@ static int l2tp_recv_ICRQ(struct l2tp_conn_t *conn,
 	uint16_t sid = 0;
 	uint16_t res = 0;
 	uint16_t err = 0;
+	uint8_t	*calling;
+	uint8_t	*called;
+	int n;
+	int m;
 
 	if (conn->state != STATE_ESTB && conn->lns_mode) {
 		log_tunnel(log_warn, conn, "discarding unexpected ICRQ\n");
@@ -3332,7 +3341,17 @@ static int l2tp_recv_ICRQ(struct l2tp_conn_t *conn,
 			case Call_Serial_Number:
 			case Bearer_Type:
 			case Calling_Number:
+			/* Save Calling-Number L2TP attribute locally */
+				if (attr->attr->id == Calling_Number) {
+					n = attr->length;
+					calling = attr->val.octets;
+				}
 			case Called_Number:
+			/* Save Called-Number L2TP attribute locally */
+				if (attr->attr->id == Called_Number) {
+					m = attr->length;
+					called = attr->val.octets;
+				}
 			case Sub_Address:
 			case Physical_Channel_ID:
 				break;
@@ -3371,6 +3390,32 @@ static int l2tp_recv_ICRQ(struct l2tp_conn_t *conn,
 	sess->peer_sid = peer_sid;
 	sid = sess->sid;
 
+	/* Allocate memory for Calling-Number and put it to l2tp_sess_t structure */
+	sess->calling_num = _malloc(n);
+	if (sess->calling_num == NULL) {
+		log_tunnel(log_error, conn, "impossible to handle ICRQ:"
+			   " can't allocate memory for Calling Number attribute,"
+			   " disconnecting session\n");
+		res = 2;
+		err = 4;
+		goto out_reject;
+	}
+	memcpy(sess->calling_num, calling, n);
+	sess->calling_num_len = n;
+
+	/* Allocate memory for Called-Number and put it to l2tp_sess_t structure */
+	sess->called_num = _malloc(m);
+	if (sess->called_num == NULL) {
+		log_tunnel(log_error, conn, "impossible to handle ICRQ:"
+			   " can't allocate memory for Called Number attribute,"
+			   " disconnecting session\n");
+		res = 2;
+		err = 4;
+		goto out_reject;
+	}
+	memcpy(sess->called_num, called, m);
+	sess->called_num_len = m;
+
 	if (unknown_attr) {
 		log_tunnel(log_error, conn, "impossible to handle ICRQ:"
 			   " unknown mandatory attribute type %i,"
@@ -3390,8 +3435,8 @@ static int l2tp_recv_ICRQ(struct l2tp_conn_t *conn,
 		goto out_reject;
 	}
 
-	log_tunnel(log_info1, conn, "new session %hu-%hu created following"
-		   " reception of ICRQ\n", sid, peer_sid);
+	log_tunnel(log_info1, conn, "new session %hu-%hu with calling num %s len %d, called num %s len %d created following"
+		   " reception of ICRQ\n", sid, peer_sid, sess->calling_num, sess->calling_num_len, sess->called_num, sess->called_num_len);
 
 	return 0;
 
